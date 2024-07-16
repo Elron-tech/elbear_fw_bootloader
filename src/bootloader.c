@@ -373,7 +373,7 @@ void SPIFI_Init()
     HAL_SPIFI_MspInit(&spifi);
     HAL_SPIFI_Reset(&spifi);
 
-    / *В Winbond для выставления QE используется команда 0x01 в 1-м бите 2го статус регистра. */
+    /* В Winbond для выставления QE используется команда 0x01 в 1-м бите 2го статус регистра. */
     uint8_t sreg2 = HAL_SPIFI_W25_ReadSREG(&spifi, W25_SREG2);
     if (!(sreg2 & (1 << 1)))
     {
