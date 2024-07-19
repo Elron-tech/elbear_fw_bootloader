@@ -373,14 +373,15 @@ void SPIFI_Init()
     HAL_SPIFI_MspInit(&spifi);
     HAL_SPIFI_Reset(&spifi);
 
-    uint8_t sreg1 = HAL_SPIFI_W25_ReadSREG(&spifi, W25_SREG1);
+    /* В Winbond для выставления QE используется команда 0x01 в 1-м бите 2го статус регистра. */
     uint8_t sreg2 = HAL_SPIFI_W25_ReadSREG(&spifi, W25_SREG2);
-
-
-    /*В Winbond для выставления QE используется команда 0x01 в 1-м бите 2го статус регистра.
-    Количество промежуточных данных в команде 4READ = 0xEB равно 3 байта (в cmd_mem)*/
-    HAL_SPIFI_W25_WriteSREG(&spifi, sreg1, sreg2 | (1 << 1)); // ? HAL_SPIFI_W25_QuadEnable(&spifi); 
+    if (!(sreg2 & (1 << 1)))
+    {
+        uint8_t sreg1 = HAL_SPIFI_W25_ReadSREG(&spifi, W25_SREG1);
+        HAL_SPIFI_W25_WriteSREG(&spifi, sreg1, sreg2 | (1 << 1)); // ? HAL_SPIFI_W25_QuadEnable(&spifi); 
+    }
     
+    /* Количество промежуточных данных в команде 4READ = 0xEB равно 3 байта (в cmd_mem). */
     SPIFI_MemoryCommandTypeDef cmd_mem = {
         .OpCode = 0xEB,
         .FieldForm = SPIFI_CONFIG_CMD_FIELDFORM_OPCODE_SERIAL,
