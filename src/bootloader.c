@@ -88,7 +88,7 @@ void Bootloader_UART_Deinit()
     UART_0->FLAGS = 0xFFFFFFFF; // сброс всех флагов
     UART_0->TXDATA = 0x00;
 
-    PAD_CONFIG->PORT_0_CFG &= (0b00 << (5 << 1)) | (0b00 << (6 << 1)); // Настройка выводов PORT0.5 и PORT0.6
+    PAD_CONFIG->PORT_0_CFG &= ~((0b11 << (5 << 1)) | (0b11 << (6 << 1))); // Настройка выводов PORT0.5 и PORT0.6
 
     PM->CLK_APB_P_SET &= !PM_CLOCK_APB_P_UART_0_M; // Выключение тактирования UART0   
 }
