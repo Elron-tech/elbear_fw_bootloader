@@ -322,7 +322,16 @@ int main()
     SystemClock_Config();
     HAL_SPIFI_MspInit(&spifi);
     HAL_SPIFI_Reset(&spifi);
-    
+
+     /* Переключение флеш-памяти в нормальный режим с командами, передав ей "0" в первом промежуточном байте */
+    const uint32_t cmd_chip_read_xip_init =
+        SPIFI_DIRECTION_INPUT |
+        SPIFI_CONFIG_CMD_INTLEN(3) |
+        SPIFI_CONFIG_CMD_FIELDFORM(SPIFI_FIELDFORM_ALL_PARALLEL) |
+        SPIFI_CONFIG_CMD_FRAMEFORM(SPIFI_FRAMEFORM_3ADDR) |
+        SPIFI_CONFIG_CMD_OPCODE(0xEB);
+    uint8_t tmp_byte_xip_init[1] = {0};
+    HAL_SPIFI_SendCommand_LL(&spifi, cmd_chip_read_xip_init, 0, 1, tmp_byte_xip_init, 0, 0, HAL_SPIFI_TIMEOUT);   
 
     Bootloader_UART_Init(); // Инициализация UART. НАстройка выводов и тактирования
     
@@ -380,21 +389,32 @@ void SPIFI_Init()
         uint8_t sreg1 = HAL_SPIFI_W25_ReadSREG(&spifi, W25_SREG1);
         HAL_SPIFI_W25_WriteSREG(&spifi, sreg1, sreg2 | (1 << 1)); // ? HAL_SPIFI_W25_QuadEnable(&spifi); 
     }
-    
-    /* Количество промежуточных данных в команде 4READ = 0xEB равно 3 байта (в cmd_mem). */
+
+    /* Переключение флеш-памяти в режим без последующих команд чтения, передав ей "0x20" в первом промежуточном байте */
+    const uint32_t cmd_chip_read_xip_init =
+        SPIFI_DIRECTION_INPUT |
+        SPIFI_CONFIG_CMD_INTLEN(3) |
+        SPIFI_CONFIG_CMD_FIELDFORM(SPIFI_FIELDFORM_OPCODE_SERIAL) |
+        SPIFI_CONFIG_CMD_FRAMEFORM(SPIFI_FRAMEFORM_OPCODE_3ADDR) |
+        SPIFI_CONFIG_CMD_OPCODE(0xEB);
+    uint8_t tmp_byte_xip_init[1] = {0};
+    HAL_SPIFI_SendCommand_LL(&spifi, cmd_chip_read_xip_init, 0, 1, tmp_byte_xip_init, 0, 0x20, HAL_SPIFI_TIMEOUT);
+
+    /* Режим SPIFI без передачи команд, но с "0x20" в первых промежуточных байтах.
+        Количество промежуточных данных в команде 4READ = 0xEB равно 3 байта (в cmd_mem). */
     SPIFI_MemoryCommandTypeDef cmd_mem = {
         .OpCode = 0xEB,
-        .FieldForm = SPIFI_CONFIG_CMD_FIELDFORM_OPCODE_SERIAL,
-        .FrameForm = SPIFI_CONFIG_CMD_FRAMEFORM_OPCODE_3ADDR,
-        .InterimData = 0,
-        .InterimLength = 3,
+        .FieldForm = SPIFI_CONFIG_CMD_FIELDFORM_ALL_PARALLEL,
+        .FrameForm = SPIFI_CONFIG_CMD_FRAMEFORM_NOOPCODE_3ADDR,
+        .InterimData = 0x20,
+        .InterimLength = 3
     };
 
     SPIFI_MemoryModeConfig_HandleTypeDef spifi_mem = {
         .Instance = spifi.Instance,
         .CacheEnable = SPIFI_CACHE_ENABLE,
         .CacheLimit = 0x00010000,
-        .Command = cmd_mem,
+        .Command = cmd_mem
     };
 
     HAL_SPIFI_MemoryMode_Init(&spifi_mem);
