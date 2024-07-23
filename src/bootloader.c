@@ -4,7 +4,7 @@
 #include "power_manager.h"
 #include "uart.h"
 #include "pad_config.h"
-#include "mcu32_memory_map.h"
+#include "mik32_memory_map.h"
 
 #include "riscv_csr_encoding.h"
 #include "csr.h"
