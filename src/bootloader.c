@@ -4,7 +4,7 @@
 #include "power_manager.h"
 #include "uart.h"
 #include "pad_config.h"
-#include "mcu32_memory_map.h"
+#include "mik32_memory_map.h"
 
 #include "riscv_csr_encoding.h"
 #include "csr.h"
@@ -16,6 +16,7 @@
                     "jalr ra"                   \
                 );
 
+#define CHIP_MODE 1   /* Режим работы МФП (SPIFI Memory Mode): 0 = QSPI или 1 = QPI */
 
 #define ACK  0x0F     /* Подтверждение */
 #define NACK 0xF0     /* Нет подтверждения */
@@ -27,7 +28,7 @@ typedef enum
 {
     PACKAGE_SIZE = 0x30,        /* Команда размера пакета */
     SEND_PACKAGE = 0x60,        /* Команда отправить пакет */
-    FULL_ERASE   = 0xFE         /* Команда стирания spifi*/
+    FULL_ERASE   = 0xFE         /* Команда стирания spifi */
 } BotloaderComand;
 
 typedef enum
@@ -316,13 +317,36 @@ void Bootloader_Commands()
 void SystemClock_Config();
 
 
-
 int main() 
 {
     SystemClock_Config();
     HAL_SPIFI_MspInit(&spifi);
     HAL_SPIFI_Reset(&spifi);
-    
+
+     /* Переключение флеш-памяти в нормальный режим с командами, передав ей "0" в промежуточном байте */
+    const uint32_t cmd_chip_read_xip_init =
+        SPIFI_DIRECTION_INPUT |
+#if CHIP_MODE == 1
+        SPIFI_CONFIG_CMD_INTLEN(1) |
+#else
+        SPIFI_CONFIG_CMD_INTLEN(3) |
+#endif
+        SPIFI_CONFIG_CMD_FIELDFORM(SPIFI_FIELDFORM_ALL_PARALLEL) |
+        SPIFI_CONFIG_CMD_FRAMEFORM(SPIFI_FRAMEFORM_3ADDR) |
+        SPIFI_CONFIG_CMD_OPCODE(0xEB);
+    uint8_t tmp_byte_xip_init[1] = {0};
+    HAL_SPIFI_SendCommand_LL(&spifi, cmd_chip_read_xip_init, 0, 1, tmp_byte_xip_init, 0, 0, HAL_SPIFI_TIMEOUT);   
+
+#if CHIP_MODE == 1
+    /* Переключение флеш-памяти из режима QPI в обычный режим SPI */
+    const uint32_t cmd_qpi_disable =
+        SPIFI_DIRECTION_INPUT |
+        SPIFI_CONFIG_CMD_INTLEN(0) |
+        SPIFI_CONFIG_CMD_FIELDFORM(SPIFI_FIELDFORM_ALL_PARALLEL) |
+        SPIFI_CONFIG_CMD_FRAMEFORM(SPIFI_FRAMEFORM_OPCODE) |
+        SPIFI_CONFIG_CMD_OPCODE(0xFF);
+    HAL_SPIFI_SendCommand_LL(&spifi, cmd_qpi_disable, 0, 0, 0, 0, 0, HAL_SPIFI_TIMEOUT);
+#endif
 
     Bootloader_UART_Init(); // Инициализация UART. НАстройка выводов и тактирования
     
@@ -380,21 +404,55 @@ void SPIFI_Init()
         uint8_t sreg1 = HAL_SPIFI_W25_ReadSREG(&spifi, W25_SREG1);
         HAL_SPIFI_W25_WriteSREG(&spifi, sreg1, sreg2 | (1 << 1)); // ? HAL_SPIFI_W25_QuadEnable(&spifi); 
     }
-    
-    /* Количество промежуточных данных в команде 4READ = 0xEB равно 3 байта (в cmd_mem). */
+
+#if CHIP_MODE == 1
+    /* Переключение флеш-памяти в режим QPI, когда весь обмен четырёхпроводной */
+    const uint32_t cmd_qpi_enable =
+        SPIFI_DIRECTION_INPUT |
+        SPIFI_CONFIG_CMD_INTLEN(0) |
+        SPIFI_CONFIG_CMD_FIELDFORM(SPIFI_FIELDFORM_ALL_SERIAL) |
+        SPIFI_CONFIG_CMD_FRAMEFORM(SPIFI_FRAMEFORM_OPCODE) |
+        SPIFI_CONFIG_CMD_OPCODE(0x38);
+    HAL_SPIFI_SendCommand_LL(&spifi, cmd_qpi_enable, 0, 0, 0, 0, 0, HAL_SPIFI_TIMEOUT);
+
+    /* Переключение флеш-памяти в режим без последующих команд чтения, передав ей "0x20" в промежуточном байте */
+    const uint32_t cmd_chip_read_qpi_xip_init =
+        SPIFI_DIRECTION_INPUT |
+        SPIFI_CONFIG_CMD_INTLEN(1) |
+        SPIFI_CONFIG_CMD_FIELDFORM(SPIFI_FIELDFORM_ALL_PARALLEL) |
+        SPIFI_CONFIG_CMD_FRAMEFORM(SPIFI_FRAMEFORM_OPCODE_3ADDR) |
+        SPIFI_CONFIG_CMD_OPCODE(0xEB);
+    uint8_t tmp_byte_xip_init[1] = {0};
+    HAL_SPIFI_SendCommand_LL(&spifi, cmd_chip_read_qpi_xip_init, 0, 1, tmp_byte_xip_init, 0, 0x20, HAL_SPIFI_TIMEOUT);
+#else
+    /* Переключение флеш-памяти в режим без последующих команд чтения, передав ей "0x20" в первом промежуточном байте */
+    const uint32_t cmd_chip_read_xip_init =
+        SPIFI_DIRECTION_INPUT |
+        SPIFI_CONFIG_CMD_INTLEN(3) |
+        SPIFI_CONFIG_CMD_FIELDFORM(SPIFI_FIELDFORM_OPCODE_SERIAL) |
+        SPIFI_CONFIG_CMD_FRAMEFORM(SPIFI_FRAMEFORM_OPCODE_3ADDR) |
+        SPIFI_CONFIG_CMD_OPCODE(0xEB);
+    uint8_t tmp_byte_xip_init[1] = {0};
+    HAL_SPIFI_SendCommand_LL(&spifi, cmd_chip_read_xip_init, 0, 1, tmp_byte_xip_init, 0, 0x20, HAL_SPIFI_TIMEOUT);
+#endif
+    /* Режим SPIFI без передачи команд, но с "0x20" в первых промежуточных байтах. */
     SPIFI_MemoryCommandTypeDef cmd_mem = {
         .OpCode = 0xEB,
-        .FieldForm = SPIFI_CONFIG_CMD_FIELDFORM_OPCODE_SERIAL,
-        .FrameForm = SPIFI_CONFIG_CMD_FRAMEFORM_OPCODE_3ADDR,
-        .InterimData = 0,
-        .InterimLength = 3,
+        .FieldForm = SPIFI_CONFIG_CMD_FIELDFORM_ALL_PARALLEL,
+        .FrameForm = SPIFI_CONFIG_CMD_FRAMEFORM_NOOPCODE_3ADDR,
+        .InterimData = 0x20,
+#if CHIP_MODE == 1
+        .InterimLength = 1 /* Количество промежуточных данных в команде 0xEB режима QPI равно 1 байт. */
+#else
+        .InterimLength = 3 /* Количество промежуточных данных в команде 0xEB режима QSPI равно 3 байта. */
+#endif
     };
 
     SPIFI_MemoryModeConfig_HandleTypeDef spifi_mem = {
         .Instance = spifi.Instance,
         .CacheEnable = SPIFI_CACHE_ENABLE,
         .CacheLimit = 0x00010000,
-        .Command = cmd_mem,
+        .Command = cmd_mem
     };
 
     HAL_SPIFI_MemoryMode_Init(&spifi_mem);
