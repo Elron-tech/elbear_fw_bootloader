@@ -455,6 +455,7 @@ void SPIFI_Init()
         .Command = cmd_mem
     };
 
+    SPIFI_CONFIG->CTRL &= 0xFFF0FFFF;
     HAL_SPIFI_MemoryMode_Init(&spifi_mem);
     // SPIFI_disableDataCache(&spifi_mem);
 }
