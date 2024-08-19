@@ -182,7 +182,8 @@ void Bootloader_LoadArrayInRam(uint8_t uart_data[])
 
 uint32_t abs_addr = 0; // адрес из хекса
 uint32_t rel_addr = 0; // адрес от начала области spifi, по нему определяем, надо ли стирать сектор и какой именно
-uint8_t page_data[256] = {0}; // сюда собираем распарсенные данные из хекса
+#define TAIL_SIZE 15             // если попадутся строки хекса, в которых не 16 байт, то мы рискуем записать данные уарта мимо буфера package_data. а если больше 16 байт, то это проблема завтрашнего дня
+uint8_t page_data[MAX_PACKAGE_SIZE + TAIL_SIZE] = {0}; // сюда собираем распарсенные данные из хекса
 uint16_t page_fill_size = 0;  // счетчик, сколько заполнно в page_data. когда page_data заполнена до конца - будем записывать в spifi
 
 void go_to_spifi();
@@ -195,12 +196,19 @@ void mem_write()
         HAL_SPIFI_W25_SectorErase4K(&spifi, rel_addr);
 
     // записываем страницу в 256 байт в spifi
-    HAL_SPIFI_W25_PageProgram(&spifi, (uint32_t)hBootloader.address, 256, page_data);
+    HAL_SPIFI_W25_PageProgram(&spifi, (uint32_t)hBootloader.address, MAX_PACKAGE_SIZE, page_data);
     // увеличиваем адреса, по которым писать и стирать
-    hBootloader.address += 256;
-    // обнуляем буфер и счетчик заполнения буфера
-    page_fill_size = 0;
-    memset(page_data, 0, 256);
+    hBootloader.address += MAX_PACKAGE_SIZE;
+    // обнуляем часть буфера, которая была записана в память и уменьшаем счетчик заполнения буфера на столько, сколько было записано
+    if (page_fill_size <= MAX_PACKAGE_SIZE)
+        page_fill_size = 0;
+    else
+        page_fill_size -= MAX_PACKAGE_SIZE;
+    memset(&page_data[0], 0, MAX_PACKAGE_SIZE);
+    // хвост копируем в начало буфера, чтобы записать его в следующий раз
+    memcpy(&page_data[0], &page_data[MAX_PACKAGE_SIZE], TAIL_SIZE);
+    // а сам хвост обнуляем 
+    memset(&page_data[MAX_PACKAGE_SIZE], 0, TAIL_SIZE);
 }
 void Bootloader_parseHexAndLoadInMemory(uint8_t rx_data[])
 {
@@ -223,7 +231,7 @@ void Bootloader_parseHexAndLoadInMemory(uint8_t rx_data[])
             // указываем, на сколько заполнился буфер
             page_fill_size += rx_data[BYTE_COUNT_POS];
             // если пора записывать целую страницу - пишемм
-            if (page_fill_size == 256)
+            if (page_fill_size >= 256)
                 mem_write();
             break;
         
