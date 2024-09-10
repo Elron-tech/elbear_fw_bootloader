@@ -24,11 +24,12 @@
 #define TIMEOUT_VALUE 1000000 /* Время ожидания загрузчика до прыжка по умолчанию в RAM 1000000 */
 
 /* Виды команд */
+#define FULL_ERASE_CMD_LEN   4
 typedef enum
 {
     PACKAGE_SIZE = 0x30,        /* Команда размера пакета */
     SEND_PACKAGE = 0x60,        /* Команда отправить пакет */
-    FULL_ERASE   = 0xFE         /* Команда стирания spifi */
+    FULL_ERASE   = 0xBADC0FEE   /* Команда стирания spifi */
 } BotloaderComand;
 
 typedef enum
@@ -51,8 +52,11 @@ typedef struct
     uint8_t command; // Текущая принятая загрузчиком команда
 } Bootloader_attributes;
 
-Bootloader_attributes hBootloader = {(uint8_t*) SPIFI_ADDRESS, MAX_PACKAGE_SIZE, ERROR_NONE, 0};
+Bootloader_attributes hBootloader = {(uint8_t*) SPIFI_ADDRESS, 0, ERROR_NONE, 0};
 uint32_t timeout = 0;
+uint32_t validCommandsTimeout = 0;
+
+void go_to_spifi();
 
 
 /* Инициализация UART */
@@ -60,7 +64,10 @@ void Bootloader_UART_Init()
 {
     PM->CLK_APB_P_SET = PM_CLOCK_APB_P_UART_0_M; // Включение тактирования UART0
 
-    PAD_CONFIG->PORT_0_CFG |= (0b01 << (5 << 1)) | (0b01 << (6 << 1)); // Настройка выводов PORT0.5 и PORT0.6
+    // Настройка выводов PORT0.5 и PORT0.6 на последовательный интерфейс
+    PAD_CONFIG->PORT_0_CFG |= (0b01 << (5 << 1)) | (0b01 << (6 << 1)); 
+    // Включение притяжки к питанию на линии rx
+    PAD_CONFIG->PORT_0_PUPD |= (0b01 << (5 << 1));
 
     /*
      * Настройки USART:
@@ -89,7 +96,10 @@ void Bootloader_UART_Deinit()
     UART_0->FLAGS = 0xFFFFFFFF; // сброс всех флагов
     UART_0->TXDATA = 0x00;
 
-    PAD_CONFIG->PORT_0_CFG &= ~((0b11 << (5 << 1)) | (0b11 << (6 << 1))); // Настройка выводов PORT0.5 и PORT0.6
+    // Настройка выводов PORT0.5 и PORT0.6 на порт общего назначения
+    PAD_CONFIG->PORT_0_CFG &= ~((0b11 << (5 << 1)) | (0b11 << (6 << 1))); 
+    // Отключение притяжки на линии rx
+    PAD_CONFIG->PORT_0_PUPD &= ~(0b01 << (5 << 1));
 
     PM->CLK_APB_P_SET &= !PM_CLOCK_APB_P_UART_0_M; // Выключение тактирования UART0   
 }
@@ -110,6 +120,7 @@ uint16_t Bootloader_UART_ReadByte()
     while ((!(UART_0->FLAGS & UART_FLAGS_RXNE_M)) && (timeout != TIMEOUT_VALUE))
     {
         timeout++;
+        validCommandsTimeout++; // Увеличить таймаут валидных команд
     }
 
     if (timeout == TIMEOUT_VALUE)
@@ -123,19 +134,17 @@ uint16_t Bootloader_UART_ReadByte()
 /* Обработчик ошибок */
 void Bootloader_ErrorHandler()
 {
+    switch (hBootloader.error)
+    {
+    case ERROR_TIMEOUT:
+        if (UART_0->FLAGS & UART_FLAGS_ORE_M)
+            UART_0->FLAGS |= UART_FLAGS_ORE_M;
         
-        switch (hBootloader.error)
-        {
-        case ERROR_TIMEOUT:
-            Bootloader_UART_WriteByte(NACK);
-            if (UART_0->FLAGS & UART_FLAGS_ORE_M)
-            {
-                UART_0->FLAGS |= UART_FLAGS_ORE_M;
-            }
-            break;
-        }
+        go_to_spifi(); // переход в основную программу, если в течение TIMEOUT_VALUE нет принятых данных
+        break;
+    }
 
-        hBootloader.error = ERROR_NONE;
+    hBootloader.error = ERROR_NONE;
 }
 
 SPIFI_HandleTypeDef spifi = {.Instance = SPIFI_CONFIG};
@@ -156,17 +165,6 @@ uint8_t erase_chip(SPIFI_HandleTypeDef *spifi)
 
 /* Загрузить данные пакета в RAM */
 #define SIZE_4K 4096
-void Bootloader_LoadArrayInRam(uint8_t uart_data[])
-{
-    static uint32_t relative_write_address;
-
-    if ((relative_write_address % SIZE_4K) == 0)
-        HAL_SPIFI_W25_SectorErase4K(&spifi, relative_write_address);
-
-    HAL_SPIFI_W25_PageProgram(&spifi, (uint32_t)hBootloader.address, hBootloader.size_package, uart_data);
-    hBootloader.address += hBootloader.size_package;
-    relative_write_address += hBootloader.size_package;
-}
 
 // разметка строки в хекс-файле
 #define BYTE_COUNT_POS  0   // индекс счетчика байт данных
@@ -175,7 +173,7 @@ void Bootloader_LoadArrayInRam(uint8_t uart_data[])
 #define RECORD_TYPE_POS 3   // индекс типа записи
 #define DATA_POS        4   // индекс начала данных в команде
 
-// типы записей в хекс-фйле
+// типы записей в хекс-файле
 #define REC_TYPE_DATA           0x00
 #define REC_TYPE_EOF            0x01
 #define REC_TYPE_EXT_LIN_ADDR   0x04
@@ -185,8 +183,6 @@ uint32_t rel_addr = 0; // адрес от начала области spifi, п�
 #define TAIL_SIZE 15             // если попадутся строки хекса, в которых не 16 байт, то мы рискуем записать данные уарта мимо буфера package_data. а если больше 16 байт, то это проблема завтрашнего дня
 uint8_t page_data[MAX_PACKAGE_SIZE + TAIL_SIZE] = {0}; // сюда собираем распарсенные данные из хекса
 uint16_t page_fill_size = 0;  // счетчик, сколько заполнно в page_data. когда page_data заполнена до конца - будем записывать в spifi
-
-void go_to_spifi();
 
 void mem_write()
 {
@@ -217,7 +213,7 @@ void Bootloader_parseHexAndLoadInMemory(uint8_t rx_data[])
     switch (rec_type)
     {
         case REC_TYPE_EXT_LIN_ADDR:
-        // если так получилось, что нам слали данные, буфер на 256 не заполнился, а тут прилетела команда смены адреса, то пишем сколько есть
+            // если так получилось, что нам слали данные, буфер на 256 не заполнился, а тут прилетела команда смены адреса, то пишем сколько есть
             if (page_fill_size != 0)
                 mem_write();
             // собираем адрес, с которого начинаем писать из данных команды смены адреса. нам присылают только 2 старших байта адреса
@@ -274,47 +270,63 @@ void Bootloader_UART_ReadPackage()
     }
 }
 
+uint8_t eraseChipBufferIndex = 0;  // Индекс для накопления команды erase chip
 void Bootloader_Commands()
 {
     while (1)
     {
         hBootloader.command = Bootloader_UART_ReadByte(); // Ожидание и считывание команды
+
+        // если долго не приходили валидные команды, переход в основную программу
+        if (validCommandsTimeout >= TIMEOUT_VALUE)
+            go_to_spifi();
+
         if (hBootloader.error)
-        {
             Bootloader_ErrorHandler(); // Обработчик ошибок
-        }
-        else
+        else 
         {
             switch (hBootloader.command)
             {
             case PACKAGE_SIZE:
-                Bootloader_UART_WriteByte(ACK); // Подтвердить команду
+                validCommandsTimeout = 0;           // Сброс таймаута валидных команд
+                eraseChipBufferIndex = 0;
+                Bootloader_UART_WriteByte(ACK);     // Подтвердить команду
                 hBootloader.size_package = Bootloader_UART_ReadByte() + 1; // Прочитать размер пакета
-                Bootloader_UART_WriteByte(ACK); // Подтвердить
-
+                Bootloader_UART_WriteByte(ACK);     // Подтвердить
                 break;
             case SEND_PACKAGE:
-                Bootloader_UART_WriteByte(ACK); // Подтвердить команду
-                Bootloader_UART_ReadPackage(); // Получить пакет и скопировать его в RAM
-
+                validCommandsTimeout = 0;           // Сброс таймаута валидных команд
+                eraseChipBufferIndex = 0;
+                Bootloader_UART_WriteByte(ACK);     // Подтвердить команду
+                Bootloader_UART_ReadPackage();      // Получить пакет и скопировать его в RAM
                 if (hBootloader.error)
-                {
-                    Bootloader_ErrorHandler(); // Обработчик ошибок
-                }
+                    Bootloader_ErrorHandler();      // Обработчик ошибок
                 else
-                {
                     Bootloader_UART_WriteByte(ACK); // Подтвердить считывание и копирования пакета в RAM
-                }
-                
-                break;
-
-            case FULL_ERASE:
-                if (erase_chip(&spifi) != HAL_OK)
-                    Bootloader_UART_WriteByte(NACK);
-                else    
-                    Bootloader_UART_WriteByte(ACK);
                 break;
             default:
+                // Вычислить ожидаемый байт команды FULL_ERASE на основе текущего индекса
+                uint8_t expectedByte = (FULL_ERASE >> ((FULL_ERASE_CMD_LEN - eraseChipBufferIndex - 1) * 8)) & 0xFF;
+                // Если полученный байт совпадает с ожидаемым байтом команды FULL_ERASE
+                if (hBootloader.command == expectedByte)
+                {
+                    // Переход к следующему байту
+                    eraseChipBufferIndex++;
+                    // Если команда FULL_ERASE полностью получена
+                    if (eraseChipBufferIndex == FULL_ERASE_CMD_LEN)
+                    {
+                        Bootloader_UART_WriteByte(ACK);     // Подтвердить получение команды
+                        // Очистка чипа
+                        if (erase_chip(&spifi) != HAL_OK)
+                            Bootloader_UART_WriteByte(NACK);
+                        else    
+                            Bootloader_UART_WriteByte(ACK); // Подтвердить успешную очистку
+                        eraseChipBufferIndex = 0;           // Сброс индекса для следующего приема
+                    }
+                    validCommandsTimeout = 0;               // Сброс таймаута валидных команд
+                } 
+                else // Если байт не совпал ни с какими валидными командами
+                    eraseChipBufferIndex = 0;               // Сброс индекса команды FULL_ERASE
                 break;
             }
         }
@@ -323,7 +335,6 @@ void Bootloader_Commands()
 
 
 void SystemClock_Config();
-
 
 int main() 
 {
@@ -356,23 +367,10 @@ int main()
     HAL_SPIFI_SendCommand_LL(&spifi, cmd_qpi_disable, 0, 0, 0, 0, 0, HAL_SPIFI_TIMEOUT);
 #endif
 
-    Bootloader_UART_Init(); // Инициализация UART. НАстройка выводов и тактирования
-    
-    timeout = 0;
-    while ((!(UART_0->FLAGS & UART_FLAGS_RXNE_M)) && (timeout != TIMEOUT_VALUE)) // Загрузчик ожидает команду
-    {
-        timeout++;
-    }
+    Bootloader_UART_Init(); // Инициализация UART. Настройка выводов и тактирования
+      
+    Bootloader_Commands(); // Обработка и ожидание команд
 
-    if (timeout == TIMEOUT_VALUE)
-    {
-        go_to_spifi();
-    }
-    else
-    {     
-        Bootloader_Commands(); // Обработка и ожидания команд
-    }
-    
     while (1)
     {
         /* code */
