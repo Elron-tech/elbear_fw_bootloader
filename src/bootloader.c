@@ -101,7 +101,7 @@ void Bootloader_UART_Deinit()
     // Отключение притяжки на линии rx
     PAD_CONFIG->PORT_0_PUPD &= ~(0b01 << (5 << 1));
 
-    PM->CLK_APB_P_SET &= !PM_CLOCK_APB_P_UART_0_M; // Выключение тактирования UART0   
+    PM->CLK_APB_P_CLEAR = PM_CLOCK_APB_P_UART_0_M; // Выключение тактирования UART0   
 }
 
 /* Отправить байт */
