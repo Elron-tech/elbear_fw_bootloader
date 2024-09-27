@@ -404,13 +404,12 @@ void SPIFI_Init()
     HAL_SPIFI_Reset(&spifi);
 
     /* В Winbond для выставления QE используется команда 0x01 в 1-м бите 2го статус регистра. */
+    uint8_t sreg1 = HAL_SPIFI_W25_ReadSREG(&spifi, W25_SREG1);
+    if (sreg1 > 0x03) sreg1 = 0; // снятие защиты от записи (protection bits)
     uint8_t sreg2 = HAL_SPIFI_W25_ReadSREG(&spifi, W25_SREG2);
-    if (!(sreg2 & (1 << 1)))
-    {
-        uint8_t sreg1 = HAL_SPIFI_W25_ReadSREG(&spifi, W25_SREG1);
-        HAL_SPIFI_W25_WriteSREG(&spifi, sreg1, sreg2 | (1 << 1)); // ? HAL_SPIFI_W25_QuadEnable(&spifi); 
-    }
-
+    if (!(sreg2 & 0x02)) sreg2 |= 0x02; // установка бита QE (quad enable)
+    HAL_SPIFI_W25_WriteSREG(&spifi, sreg1, sreg2);
+	
 #if CHIP_MODE == 1
     /* Переключение флеш-памяти в режим QPI, когда весь обмен четырёхпроводной */
     const uint32_t cmd_qpi_enable =
